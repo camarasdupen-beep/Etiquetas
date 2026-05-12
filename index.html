@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Etiquetas de Góndola · Loyverse</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #161b22; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    @media print {
+      body { background: white !important; }
+      #app-ui { display: none !important; }
+      #print-area { display: block !important; }
+    }
+
+    #print-area {
+      display: none;
+    }
+
+    .label-sheet {
+      width: 210mm;
+      min-height: 297mm;
+      padding: 8mm;
+      background: white;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      gap: 2mm;
+      page-break-after: always;
+    }
+
+    .label {
+      border: 0.5px solid #ccc;
+      border-radius: 2px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2mm 3mm;
+      text-align: center;
+      overflow: hidden;
+    }
+
+    .label-name {
+      font-family: Arial, sans-serif;
+      font-size: 7.5pt;
+      font-weight: 600;
+      color: #111;
+      line-height: 1.2;
+      word-break: break-word;
+      margin-bottom: 2mm;
+    }
+
+    .label-price {
+      font-family: Arial, sans-serif;
+      font-size: 14pt;
+      font-weight: 900;
+      color: #000;
+      letter-spacing: -0.5px;
+    }
+
+    .label-price-sym {
+      font-size: 8pt;
+      font-weight: 700;
+      vertical-align: super;
+      margin-right: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app-ui"></div>
+  <div id="print-area"></div>
+
+  <script type="text/babel">
+    const { useState, useCallback } = React;
+
+    const PROXY    = "https://corsproxy.io/?";
+    const API_BASE = `${PROXY}https://api.loyverse.com/v1.0`;
+
+    const C = {
+      bg:"#0d1117", surface:"#161b22", card:"#1c2230", border:"#30363d",
+      accent:"#f0b429", accentDim:"#f0b42918",
+      green:"#3fb950", greenDim:"#3fb95018",
+      red:"#f85149", redDim:"#f8514918",
+      blue:"#58a6ff",
+      text:"#e6edf3", muted:"#768390", faint:"#3d444d",
+    };
+
+    const fmtPrice = (n) => {
+      if (n == null) return "—";
+      const parts = Number(n).toFixed(2).split(".");
+      return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".") + "," + parts[1];
+    };
+
+    const getPrice = (v) => {
+      if (Array.isArray(v.stores) && v.stores.length > 0) {
+        const sp = v.stores[0];
+        if (sp.price != null) return sp.price;
+      }
+      if (v.default_price != null) return v.default_price;
+      if (v.price != null)         return v.price;
+      return null;
+    };
+
+    // ── render labels into the print div ────────────────────────────────────
+    function renderPrintArea(selectedItems) {
+      const printDiv = document.getElementById("print-area");
+      const COLS = 4, ROWS = 8, PER_PAGE = COLS * ROWS;
+
+      let html = "";
+      for (let p = 0; p < Math.ceil(selectedItems.length / PER_PAGE); p++) {
+        const pageItems = selectedItems.slice(p * PER_PAGE, (p + 1) * PER_PAGE);
+        // pad to fill grid
+        while (pageItems.length < PER_PAGE) pageItems.push(null);
+
+        html += `<div class="label-sheet">`;
+        for (const item of pageItems) {
+          if (!item) {
+            html += `<div class="label" style="border:0.5px dashed #eee;"></div>`;
+          } else {
+            const price = fmtPrice(item.price);
+            html += `
+              <div class="label">
+                <div class="label-name">${item.name}</div>
+                <div class="label-price"><span class="label-price-sym">$</span>${price}</div>
+              </div>`;
+          }
+        }
+        html += `</div>`;
+      }
+      printDiv.innerHTML = html;
+    }
+
+    function App() {
+      const [token,    setToken]    = useState("");
+      const [loading,  setLoading]  = useState(false);
+      const [error,    setError]    = useState("");
+      const [items,    setItems]    = useState([]);
+      const [selected, setSelected] = useState(new Set());
+      const [filter,   setFilter]   = useState("");
+      const [catFilter,setCatFilter]= useState("todas");
+      const [catMap,   setCatMap]   = useState({});
+
+      const fetchProducts = useCallback(async () => {
+        if (!token.trim()) { setError("Ingresá tu token de Loyverse."); return; }
+        setLoading(true); setError(""); setItems([]); setSelected(new Set());
+        try {
+          const catRes  = await fetch(`${API_BASE}/categories?limit=250`, {
+            headers:{ Authorization:`Bearer ${token.trim()}` }
+          });
+          const catData = catRes.ok ? await catRes.json() : { categories:[] };
+          const cm = {};
+          for (const c of catData.categories || []) cm[c.id] = c.name;
+          setCatMap(cm);
+
+          let all = [], cursor = null;
+          do {
+            const url = `${API_BASE}/items?limit=250` + (cursor ? `&cursor=${cursor}` : "");
+            const res = await fetch(url, { headers:{ Authorization:`Bearer ${token.trim()}` } });
+            if (!res.ok) throw new Error(`Error ${res.status}: ${await res.text()}`);
+            const data = await res.json();
+            all = all.concat(data.items || []);
+            cursor = data.cursor || null;
+          } while (cursor);
+
+          const flat = [];
+          for (const item of all)
+            for (const v of item.variants || [])
+              flat.push({
+                variantId: v.variant_id || v.id,
+                name: item.item_name,
+                categoryId: item.category_id || null,
+                price: getPrice(v),
+              });
+
+          flat.sort((a,b) => a.name.localeCompare(b.name));
+          setItems(flat);
+        } catch(e) { setError(e.message); }
+        finally    { setLoading(false); }
+      }, [token]);
+
+      const cats = ["todas", ...Object.values(catMap).sort((a,b)=>a.localeCompare(b))];
+
+      const filtered = items.filter(i => {
+        const matchCat = catFilter === "todas" || catMap[i.categoryId] === catFilter;
+        const matchQ   = !filter || i.name.toLowerCase().includes(filter.toLowerCase());
+        return matchCat && matchQ;
+      });
+
+      const allChecked  = filtered.length > 0 && filtered.every(i => selected.has(i.variantId));
+      const someChecked = filtered.some(i => selected.has(i.variantId)) && !allChecked;
+
+      const toggleAll = () => {
+        const ids = filtered.map(i => i.variantId);
+        if (allChecked) setSelected(prev => { const s=new Set(prev); ids.forEach(id=>s.delete(id)); return s; });
+        else            setSelected(prev => { const s=new Set(prev); ids.forEach(id=>s.add(id)); return s; });
+      };
+      const toggle = (id) => setSelected(prev => {
+        const s=new Set(prev); s.has(id)?s.delete(id):s.add(id); return s;
+      });
+
+      const handlePrint = () => {
+        const toPrint = items.filter(i => selected.has(i.variantId));
+        if (!toPrint.length) return;
+        renderPrintArea(toPrint);
+        window.print();
+      };
+
+      const handleExportPDF = () => {
+        const toPrint = items.filter(i => selected.has(i.variantId));
+        if (!toPrint.length) return;
+
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" });
+
+        const PAGE_W = 210, PAGE_H = 297;
+        const MARGIN = 8;
+        const COLS = 4, ROWS = 8;
+        const PER_PAGE = COLS * ROWS;
+        const GAP = 2;
+        const LABEL_W = (PAGE_W - MARGIN*2 - GAP*(COLS-1)) / COLS;
+        const LABEL_H = (PAGE_H - MARGIN*2 - GAP*(ROWS-1)) / ROWS;
+
+        let page = 0;
+        for (let i = 0; i < toPrint.length; i++) {
+          const posInPage = i % PER_PAGE;
+          if (posInPage === 0 && i > 0) {
+            doc.addPage();
+            page++;
+          }
+          const col = posInPage % COLS;
+          const row = Math.floor(posInPage / COLS);
+          const x = MARGIN + col * (LABEL_W + GAP);
+          const y = MARGIN + row * (LABEL_H + GAP);
+
+          const item = toPrint[i];
+
+          // border
+          doc.setDrawColor(180,180,180);
+          doc.setLineWidth(0.2);
+          doc.rect(x, y, LABEL_W, LABEL_H);
+
+          // product name — wrap if needed
+          doc.setFont("helvetica","bold");
+          doc.setFontSize(6.5);
+          doc.setTextColor(30,30,30);
+          const lines = doc.splitTextToSize(item.name, LABEL_W - 3);
+          const nameLines = lines.slice(0,3); // max 3 lines
+          const nameH = nameLines.length * 3.2;
+          doc.text(nameLines, x + LABEL_W/2, y + 4, { align:"center" });
+
+          // price
+          const price = fmtPrice(item.price);
+          doc.setFont("helvetica","bold");
+          doc.setFontSize(13);
+          doc.setTextColor(0,0,0);
+          doc.text(`$${price}`, x + LABEL_W/2, y + LABEL_H - 3, { align:"center" });
+        }
+
+        const now = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
+        doc.save(`etiquetas_gondola_${now.replace(/\//g,"-")}.pdf`);
+      };
+
+      const inp = (extra={}) => ({
+        background:C.surface, border:`1px solid ${C.border}`, borderRadius:"8px",
+        padding:"10px 13px", color:C.text, fontSize:"13px",
+        fontFamily:"'IBM Plex Mono','Fira Code',monospace", outline:"none", width:"100%", ...extra,
+      });
+
+      return (
+        <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'IBM Plex Mono','Fira Code',monospace"}}>
+
+          {/* HEADER */}
+          <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"18px 28px",display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+            <span style={{fontSize:"20px"}}>🏷</span>
+            <div>
+              <div style={{fontSize:"18px",fontWeight:700,color:C.accent}}>Etiquetas de Góndola</div>
+              <div style={{fontSize:"11px",color:C.muted,marginTop:"1px"}}>Loyverse · Impresión A4 · 32 etiquetas por hoja</div>
+            </div>
+            {items.length > 0 && (
+              <div style={{marginLeft:"auto",background:C.accentDim,border:`1px solid ${C.accent}44`,borderRadius:"8px",padding:"6px 14px",fontSize:"12px",color:C.accent}}>
+                {selected.size} seleccionadas
+              </div>
+            )}
+          </div>
+
+          <div style={{maxWidth:"900px",margin:"0 auto",padding:"24px 16px"}}>
+
+            {/* CONFIG */}
+            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",padding:"20px",marginBottom:"20px"}}>
+              <div style={{fontSize:"11px",color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginBottom:"14px"}}>⚙ Configuración</div>
+              <div style={{display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"flex-end"}}>
+                <div style={{flex:2,minWidth:"220px",display:"flex",flexDirection:"column",gap:"5px"}}>
+                  <label style={{fontSize:"11px",color:C.muted}}>Token de API Loyverse</label>
+                  <input type="password" placeholder="Pegá tu token aquí..." value={token}
+                    onChange={e=>setToken(e.target.value)}
+                    onKeyDown={e=>e.key==="Enter"&&fetchProducts()}
+                    style={inp()} />
+                </div>
+                <button onClick={fetchProducts} disabled={loading}
+                  style={{background:loading?C.faint:C.accent,color:loading?C.muted:"#111",border:"none",borderRadius:"8px",padding:"10px 18px",fontFamily:"inherit",fontSize:"13px",fontWeight:700,cursor:loading?"default":"pointer",whiteSpace:"nowrap",height:"40px"}}>
+                  {loading?"Cargando...":"🔄 Traer productos"}
+                </button>
+              </div>
+              {error && (
+                <div style={{marginTop:"12px",background:C.redDim,border:`1px solid ${C.red}44`,borderRadius:"8px",padding:"10px 14px",color:C.red,fontSize:"12px"}}>
+                  ⚠ {error}
+                </div>
+              )}
+            </div>
+
+            {/* FILTERS + PRINT BAR */}
+            {items.length > 0 && (
+              <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"center"}}>
+                <input placeholder="Buscar producto..." value={filter}
+                  onChange={e=>setFilter(e.target.value)}
+                  style={inp({fontSize:"12px",padding:"7px 12px",width:"180px"})} />
+                <select value={catFilter} onChange={e=>setCatFilter(e.target.value)}
+                  style={{...inp({fontSize:"12px",padding:"7px 12px",width:"160px"}),cursor:"pointer"}}>
+                  {cats.map(c=><option key={c} value={c}>{c==="todas"?"Todos los proveedores":c}</option>)}
+                </select>
+                <span style={{fontSize:"12px",color:C.muted}}>
+                  {filtered.length} productos
+                </span>
+                <div style={{marginLeft:"auto",display:"flex",gap:"8px"}}>
+                  <button onClick={toggleAll}
+                    style={{background:C.surface,color:C.text,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"8px 14px",fontFamily:"inherit",fontSize:"12px",fontWeight:600,cursor:"pointer"}}>
+                    {allChecked?"Deseleccionar todo":"Seleccionar todo"}
+                  </button>
+                  <button onClick={handleExportPDF} disabled={selected.size===0}
+                    style={{background:selected.size===0?C.faint:C.red,color:selected.size===0?C.muted:"#fff",border:"none",borderRadius:"8px",padding:"8px 18px",fontFamily:"inherit",fontSize:"13px",fontWeight:700,cursor:selected.size===0?"default":"pointer",whiteSpace:"nowrap"}}>
+                    📄 PDF ({selected.size})
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* PRODUCT LIST */}
+            {items.length > 0 && (
+              <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",overflow:"hidden"}}>
+                <div style={{overflowY:"auto",maxHeight:"560px"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead>
+                      <tr>
+                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,width:"40px"}}>
+                          <input type="checkbox" checked={allChecked}
+                            ref={el=>{if(el)el.indeterminate=someChecked;}}
+                            onChange={toggleAll} style={{cursor:"pointer"}} />
+                        </th>
+                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",textAlign:"left"}}>
+                          Producto
+                        </th>
+                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",textAlign:"left"}}>
+                          Proveedor
+                        </th>
+                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",textAlign:"right"}}>
+                          Precio
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtered.map((item,idx)=>{
+                        const isSel = selected.has(item.variantId);
+                        return (
+                          <tr key={item.variantId}
+                            onClick={()=>toggle(item.variantId)}
+                            style={{background:isSel?C.accentDim:idx%2===0?"transparent":C.surface+"44",cursor:"pointer",transition:"background .1s"}}>
+                            <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}22`,textAlign:"center"}}>
+                              <input type="checkbox" checked={isSel} onChange={()=>toggle(item.variantId)}
+                                onClick={e=>e.stopPropagation()} style={{cursor:"pointer"}} />
+                            </td>
+                            <td style={{padding:"10px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`}}>
+                              {item.name}
+                            </td>
+                            <td style={{padding:"10px 14px",fontSize:"12px",color:C.blue,borderBottom:`1px solid ${C.border}22`}}>
+                              {catMap[item.categoryId]||"Sin categoría"}
+                            </td>
+                            <td style={{padding:"10px 14px",fontSize:"13px",fontWeight:700,color:C.accent,textAlign:"right",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                              ${fmtPrice(item.price)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {filtered.length===0 && (
+                    <div style={{textAlign:"center",padding:"40px",color:C.muted,fontSize:"13px"}}>
+                      No hay productos que coincidan.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* EMPTY STATE */}
+            {!loading && items.length===0 && !error && (
+              <div style={{background:C.card,border:`1px dashed ${C.border}`,borderRadius:"12px",padding:"60px 24px",textAlign:"center"}}>
+                <div style={{fontSize:"40px",marginBottom:"12px"}}>🏷</div>
+                <div style={{fontSize:"15px",color:C.muted,marginBottom:"6px"}}>
+                  Ingresá tu token y traé los productos
+                </div>
+                <div style={{fontSize:"12px",color:C.faint}}>
+                  Seleccioná los que querés etiquetar y presioná Imprimir
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("app-ui")).render(<App />);
+  </script>
+</body>
+</html>
