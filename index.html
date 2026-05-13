@@ -38,40 +38,51 @@
     }
 
     .label {
-      border: 0.5px solid #ccc;
+      border: 0.3px solid #aaa;
       border-radius: 2px;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 2mm 3mm;
+      padding: 2mm 2.5mm;
       text-align: center;
       overflow: hidden;
     }
 
     .label-name {
-      font-family: Arial, sans-serif;
-      font-size: 7.5pt;
-      font-weight: 600;
-      color: #111;
-      line-height: 1.2;
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 6.5pt;
+      font-weight: 700;
+      color: #333;
+      line-height: 1.25;
       word-break: break-word;
-      margin-bottom: 2mm;
+      text-transform: uppercase;
+      letter-spacing: 0.2px;
+    }
+
+    .label-sep {
+      width: 70%;
+      height: 0;
+      border: none;
+      border-top: 0.3px solid #ccc;
+      margin: 1.5mm 0;
     }
 
     .label-price {
-      font-family: Arial, sans-serif;
+      font-family: Arial, Helvetica, sans-serif;
       font-size: 14pt;
       font-weight: 900;
       color: #000;
       letter-spacing: -0.5px;
+      line-height: 1;
     }
 
     .label-price-sym {
-      font-size: 8pt;
+      font-size: 7.5pt;
       font-weight: 700;
       vertical-align: super;
-      margin-right: 1px;
+      line-height: 0;
+      margin-right: 0.5px;
     }
   </style>
 </head>
@@ -130,6 +141,7 @@
             html += `
               <div class="label">
                 <div class="label-name">${item.name}</div>
+                <hr class="label-sep">
                 <div class="label-price"><span class="label-price-sym">$</span>${price}</div>
               </div>`;
           }
@@ -243,26 +255,69 @@
 
           const item = toPrint[i];
 
-          // border
-          doc.setDrawColor(180,180,180);
-          doc.setLineWidth(0.2);
+          // ── border ──────────────────────────────────────────────────────────
+          doc.setDrawColor(160,160,160);
+          doc.setLineWidth(0.3);
           doc.rect(x, y, LABEL_W, LABEL_H);
 
-          // product name — wrap if needed
+          // ── measure text blocks ──────────────────────────────────────────────
+          const PAD = 2;            // horizontal inner padding (mm each side)
+          const textW = LABEL_W - PAD * 2;
+
+          // Name: up to 3 lines at 6.5pt → line-height ~3.1mm
           doc.setFont("helvetica","bold");
           doc.setFontSize(6.5);
-          doc.setTextColor(30,30,30);
-          const lines = doc.splitTextToSize(item.name, LABEL_W - 3);
-          const nameLines = lines.slice(0,3); // max 3 lines
-          const nameH = nameLines.length * 3.2;
-          doc.text(nameLines, x + LABEL_W/2, y + 4, { align:"center" });
+          const NAME_LH = 3.1;
+          const allNameLines = doc.splitTextToSize(item.name.toUpperCase(), textW);
+          const nameLines = allNameLines.slice(0, 3);
+          const nameBlockH = nameLines.length * NAME_LH;
 
-          // price
-          const price = fmtPrice(item.price);
+          // Price: 14pt → ~5mm cap-height; separator line: 1mm gap above + 0.3mm + 1mm gap below
+          const SEP_GAP = 1.2;      // gap above separator
+          const SEP_H   = 0.3;      // separator line thickness (visual)
+          const PRICE_LH = 5.5;     // approx height for 14pt text
+          const SEP_BELOW = 1.2;    // gap below separator
+
+          const totalBlockH = nameBlockH + SEP_GAP + SEP_H + SEP_BELOW + PRICE_LH;
+
+          // vertical start so the block is centred in the label
+          const blockTop = y + (LABEL_H - totalBlockH) / 2;
+
+          // ── product name ────────────────────────────────────────────────────
           doc.setFont("helvetica","bold");
-          doc.setFontSize(13);
-          doc.setTextColor(0,0,0);
-          doc.text(`$${price}`, x + LABEL_W/2, y + LABEL_H - 3, { align:"center" });
+          doc.setFontSize(6.5);
+          doc.setTextColor(50, 50, 50);
+          // baseline of first line
+          const nameY = blockTop + NAME_LH;
+          doc.text(nameLines, x + LABEL_W / 2, nameY, { align: "center", lineHeightFactor: 1.0 });
+
+          // ── separator ───────────────────────────────────────────────────────
+          const sepY = blockTop + nameBlockH + SEP_GAP;
+          doc.setDrawColor(200, 200, 200);
+          doc.setLineWidth(0.2);
+          const sepInset = LABEL_W * 0.15;
+          doc.line(x + sepInset, sepY, x + LABEL_W - sepInset, sepY);
+
+          // ── price ───────────────────────────────────────────────────────────
+          const price = fmtPrice(item.price);
+          const priceY = sepY + SEP_H + SEP_BELOW + PRICE_LH - 0.5;
+
+          // currency symbol (small, superscript-like)
+          doc.setFont("helvetica","bold");
+          doc.setFontSize(7);
+          doc.setTextColor(0, 0, 0);
+          const symW = doc.getTextWidth("$");
+          // price number
+          doc.setFont("helvetica","bold");
+          doc.setFontSize(14);
+          const numW = doc.getTextWidth(price);
+          const totalPriceW = symW + 0.5 + numW;
+          const priceStartX = x + (LABEL_W - totalPriceW) / 2;
+
+          doc.setFontSize(7);
+          doc.text("$", priceStartX, priceY - 1.8);          // raised symbol
+          doc.setFontSize(14);
+          doc.text(price, priceStartX + symW + 0.5, priceY); // number baseline
         }
 
         const now = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
