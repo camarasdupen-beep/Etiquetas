@@ -26,7 +26,45 @@
 
     const PROXY       = "https://corsproxy.io/?";
     const API_BASE    = `${PROXY}https://api.loyverse.com/v1.0`;
-    const INDEC_API   = `${PROXY}https://api.argentinadatos.com/v1/finanzas/indices/inflacion`;
+
+    // Fuentes IPC en cascada: se prueban en orden hasta que una responda bien
+    const INDEC_SOURCES = [
+      // 1. ArgentinaDatos (tercero, agrega INDEC)
+      {
+        label: "ArgentinaDatos",
+        fetch: async () => {
+          const r = await fetch(`${PROXY}https://api.argentinadatos.com/v1/finanzas/indices/inflacion`);
+          const data = await r.json();
+          if (!Array.isArray(data) || !data.length) throw new Error("sin datos");
+          const last = data[data.length - 1];
+          return { valor: last.valor, fecha: last.fecha };
+        }
+      },
+      // 2. API Series de Tiempo datos.gob.ar (INDEC oficial, IPC nivel general mensual)
+      {
+        label: "datos.gob.ar",
+        fetch: async () => {
+          const r = await fetch(
+            "https://apis.datos.gob.ar/series/api/series/?ids=148.3_INIVELNAL_DICI_M_26&last=2&format=json&collapse=month&representation_mode=percent_change"
+          );
+          const data = await r.json();
+          if (!data.data || !data.data.length) throw new Error("sin datos");
+          const last = data.data[data.data.length - 1];
+          return { valor: parseFloat((last[1] * 100).toFixed(1)), fecha: last[0].slice(0,7) };
+        }
+      },
+      // 3. Mismo endpoint sin proxy (por si el proxy está bloqueado pero el dominio no)
+      {
+        label: "ArgentinaDatos directo",
+        fetch: async () => {
+          const r = await fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacion");
+          const data = await r.json();
+          if (!Array.isArray(data) || !data.length) throw new Error("sin datos");
+          const last = data[data.length - 1];
+          return { valor: last.valor, fecha: last.fecha };
+        }
+      },
+    ];
     const LS_HISTORY  = "loyverse_price_history";
     const LS_SNAPSHOT = "loyverse_price_snapshot";
     const LS_MANUAL   = "loyverse_manual_updates";  // { variantId: isoDate }
@@ -343,6 +381,8 @@
       const [manual,    setManual]    = useState(() => loadJSON(LS_MANUAL, {}));
       const [indec,     setIndec]     = useState(null);
       const [indecLoad, setIndecLoad] = useState(false);
+      const [indecSource, setIndecSource] = useState("");   // qué fuente respondió
+      const [indecFailed, setIndecFailed] = useState(false); // todas fallaron
       const [labelDays, setLabelDays] = useState(1);   // 0 = todos
       const [labelMode, setLabelMode] = useState("manual"); // "manual" | "auto"
 
@@ -358,22 +398,29 @@
       // ── auto-fetch products on mount ─────────────────────────────────────
       useEffect(() => { fetchProducts(); }, []);
 
-      // ── fetch INDEC ───────────────────────────────────────────────────────
+      // ── fetch INDEC: intenta múltiples fuentes en cascada ────────────────
       useEffect(() => {
         setIndecLoad(true);
-        fetch(INDEC_API)
-          .then(r=>r.json())
-          .then(data => {
-            if (Array.isArray(data) && data.length > 0) {
-              const last = data[data.length-1];
-              const d    = new Date(last.fecha+"T12:00:00");
-              const mes  = d.toLocaleDateString("es-AR",{month:"long",year:"numeric"});
-              setIndec({ valor: last.valor, fecha: mes });
-              setInflation(String(last.valor));
+        setIndecFailed(false);
+        (async () => {
+          for (const source of INDEC_SOURCES) {
+            try {
+              const { valor, fecha } = await source.fetch();
+              const d   = new Date(fecha + (fecha.length === 7 ? "-01" : "") + "T12:00:00");
+              const mes = d.toLocaleDateString("es-AR", { month:"long", year:"numeric" });
+              setIndec({ valor, fecha: mes });
+              setIndecSource(source.label);
+              setInflation(String(valor));
+              setIndecLoad(false);
+              return; // éxito, salir
+            } catch(e) {
+              // intentar siguiente fuente
             }
-          })
-          .catch(()=>{})
-          .finally(()=>setIndecLoad(false));
+          }
+          // todas fallaron
+          setIndecFailed(true);
+          setIndecLoad(false);
+        })();
       }, []);
 
       // ── fetch productos + categorías ──────────────────────────────────────
@@ -450,7 +497,60 @@
         });
       };
 
-      // ── sort & filter ─────────────────────────────────────────────────────
+      // ── exportar datos a JSON ─────────────────────────────────────────────
+      const exportData = () => {
+        const payload = {
+          exportDate: new Date().toISOString(),
+          manual,
+          history,
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type:"application/json" });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement("a");
+        const date = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"}).replace(/\//g,"-");
+        a.href = url; a.download = `actualizaciones_${date}.json`; a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      // ── importar datos desde JSON ─────────────────────────────────────────
+      const importData = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const payload = JSON.parse(ev.target.result);
+            if (payload.manual) {
+              // merge: conservar fechas más recientes
+              setManual(prev => {
+                const merged = { ...prev };
+                for (const [id, date] of Object.entries(payload.manual)) {
+                  if (!merged[id] || date > merged[id]) merged[id] = date;
+                }
+                saveJSON(LS_MANUAL, merged);
+                return merged;
+              });
+            }
+            if (payload.history) {
+              setHistory(prev => {
+                const merged = { ...prev };
+                for (const [id, val] of Object.entries(payload.history)) {
+                  if (!merged[id]?.changedAt || (val.changedAt && val.changedAt > merged[id].changedAt)) {
+                    merged[id] = val;
+                  }
+                }
+                saveJSON(LS_HISTORY, merged);
+                return merged;
+              });
+            }
+            alert(`✓ Datos importados correctamente desde "${file.name}"`);
+          } catch {
+            alert("⚠ El archivo no es válido.");
+          }
+        };
+        reader.readAsText(file);
+        e.target.value = ""; // permitir reimportar el mismo archivo
+      };
       const handleSort = (col) => {
         if (sortBy===col) setSortDir(d=>-d);
         else { setSortBy(col); setSortDir(1); }
@@ -532,24 +632,50 @@
 
             {/* INDEC BANNER */}
             <div style={{
-              background:indec?C.blueDim:C.card,
-              border:`1px solid ${indec?C.blue+"66":C.border}`,
+              background: indec ? C.blueDim : indecFailed ? C.accentDim : C.card,
+              border:`1px solid ${indec ? C.blue+"66" : indecFailed ? C.accent+"66" : C.border}`,
               borderRadius:"10px", padding:"14px 18px", marginBottom:"16px",
               display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap",
             }}>
-              <span style={{fontSize:"18px"}}>🏛</span>
-              <div>
+              <span style={{fontSize:"18px"}}>{indecFailed ? "⚠️" : "🏛"}</span>
+              <div style={{flex:1, minWidth:"200px"}}>
                 <div style={{fontSize:"11px",color:C.muted,letterSpacing:"1px",textTransform:"uppercase",marginBottom:"3px"}}>
                   IPC INDEC · Último dato oficial
                 </div>
                 {indecLoad
-                  ? <div style={{fontSize:"13px",color:C.muted}}>Cargando dato oficial...</div>
+                  ? <div style={{fontSize:"13px",color:C.muted}}>Buscando dato en múltiples fuentes...</div>
                   : indec
                     ? <div style={{display:"flex",alignItems:"baseline",gap:"10px",flexWrap:"wrap"}}>
                         <span style={{fontSize:"26px",fontWeight:700,color:C.blue}}>+{indec.valor}%</span>
-                        <span style={{fontSize:"13px",color:C.muted}}>{indec.fecha} · Fuente: INDEC vía ArgentinaDatos</span>
+                        <span style={{fontSize:"13px",color:C.muted}}>{indec.fecha} · vía {indecSource}</span>
                       </div>
-                    : <div style={{fontSize:"13px",color:C.muted}}>No se pudo cargar el dato del INDEC</div>
+                    : indecFailed
+                      ? <div>
+                          <div style={{fontSize:"12px",color:C.accent,marginBottom:"8px"}}>
+                            No se pudo obtener el dato automáticamente. Ingresalo manualmente:
+                          </div>
+                          <div style={{display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}}>
+                            <input
+                              type="number" min="0" step="0.1"
+                              placeholder="ej: 2.8"
+                              value={inflation}
+                              onChange={e => setInflation(e.target.value)}
+                              style={{
+                                background:C.surface, border:`1px solid ${C.accent}88`,
+                                borderRadius:"6px", padding:"6px 10px", color:C.accent,
+                                fontSize:"18px", fontWeight:700, width:"100px",
+                                fontFamily:"inherit", outline:"none",
+                              }}
+                            />
+                            <span style={{fontSize:"12px",color:C.muted}}>% mensual INDEC</span>
+                            <a href="https://www.indec.gob.ar/indec/web/Nivel4-Tema-3-5-31"
+                              target="_blank" rel="noreferrer"
+                              style={{fontSize:"11px",color:C.blue}}>
+                              Ver en indec.gob.ar →
+                            </a>
+                          </div>
+                        </div>
+                      : <div style={{fontSize:"13px",color:C.muted}}>Cargando...</div>
                 }
               </div>
               {indec && <div style={{marginLeft:"auto",fontSize:"11px",color:C.muted,textAlign:"right"}}><div>Precargado</div><div>en el campo ↓</div></div>}
@@ -632,7 +758,20 @@
                   {filtered.length!==items.length?`${filtered.length} de ${items.length}`:`${items.length}`} productos
                 </span>
                 <div style={{marginLeft:"auto", display:"flex", gap:"8px", alignItems:"center", flexWrap:"wrap"}}>
-                  {/* --- etiquetas --- */}
+                  {/* --- sincronizar --- */}
+                  <div style={{display:"flex",alignItems:"center",gap:"6px",background:C.card,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"5px 10px"}}>
+                    <span style={{fontSize:"11px",color:C.muted,whiteSpace:"nowrap"}}>💾 Datos:</span>
+                    <button onClick={exportData}
+                      title="Exportar actualizaciones manuales a un archivo JSON para usar en otro dispositivo"
+                      style={{background:C.greenDim,color:C.green,border:`1px solid ${C.green}44`,borderRadius:"6px",padding:"4px 10px",fontFamily:"inherit",fontSize:"11px",fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                      ⬇ Exportar
+                    </button>
+                    <label title="Importar actualizaciones desde un archivo exportado previamente"
+                      style={{background:C.blueDim,color:C.blue,border:`1px solid ${C.blue}44`,borderRadius:"6px",padding:"4px 10px",fontFamily:"inherit",fontSize:"11px",fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                      ⬆ Importar
+                      <input type="file" accept=".json" onChange={importData} style={{display:"none"}} />
+                    </label>
+                  </div>
                   <div style={{display:"flex",alignItems:"center",gap:"6px",background:C.card,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"5px 10px"}}>
                     <span style={{fontSize:"11px",color:C.muted,whiteSpace:"nowrap"}}>🏷 Etiquetas:</span>
                     <select value={labelMode} onChange={e=>setLabelMode(e.target.value)}
