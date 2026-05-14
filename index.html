@@ -3,168 +3,385 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Etiquetas de Góndola · Loyverse</title>
+  <title>Control de Precios · Loyverse</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0d1117; }
-    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #161b22; }
     ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
-
-    @media print {
-      body { background: white !important; }
-      #app-ui { display: none !important; }
-      #print-area { display: block !important; }
-    }
-
-    #print-area {
-      display: none;
-    }
-
-    .label-sheet {
-      width: 210mm;
-      min-height: 297mm;
-      padding: 8mm;
-      background: white;
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      grid-template-rows: repeat(8, 1fr);
-      gap: 2mm;
-      page-break-after: always;
-    }
-
-    .label {
-      border: 0.3px solid #aaa;
-      border-radius: 2px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 2mm 2.5mm;
-      text-align: center;
-      overflow: hidden;
-    }
-
-    .label-name {
-      font-family: Arial, Helvetica, sans-serif;
-      font-size: 6.5pt;
-      font-weight: 700;
-      color: #333;
-      line-height: 1.25;
-      word-break: break-word;
-      text-transform: uppercase;
-      letter-spacing: 0.2px;
-    }
-
-    .label-sep {
-      width: 70%;
-      height: 0;
-      border: none;
-      border-top: 0.3px solid #ccc;
-      margin: 1.5mm 0;
-    }
-
-    .label-price {
-      font-family: Arial, Helvetica, sans-serif;
-      font-size: 14pt;
-      font-weight: 900;
-      color: #000;
-      letter-spacing: -0.5px;
-      line-height: 1;
-    }
-
-    .label-price-sym {
-      font-size: 7.5pt;
-      font-weight: 700;
-      vertical-align: super;
-      line-height: 0;
-      margin-right: 0.5px;
-    }
+    input[type=number]::-webkit-inner-spin-button { opacity: 0.5; }
+    a { color: #58a6ff; }
   </style>
 </head>
 <body>
-  <div id="app-ui"></div>
-  <div id="print-area"></div>
-
+  <div id="root"></div>
   <script type="text/babel">
-    const { useState, useCallback } = React;
+    const { useState, useCallback, useEffect } = React;
 
-    const PROXY    = "https://corsproxy.io/?";
-    const API_BASE = `${PROXY}https://api.loyverse.com/v1.0`;
+    const PROXY       = "https://corsproxy.io/?";
+    const API_BASE    = `${PROXY}https://api.loyverse.com/v1.0`;
+    const INDEC_API   = `${PROXY}https://api.argentinadatos.com/v1/finanzas/indices/inflacion`;
+    const LS_HISTORY  = "loyverse_price_history";
+    const LS_SNAPSHOT = "loyverse_price_snapshot";
+    const LS_MANUAL   = "loyverse_manual_updates";  // { variantId: isoDate }
 
     const C = {
       bg:"#0d1117", surface:"#161b22", card:"#1c2230", border:"#30363d",
       accent:"#f0b429", accentDim:"#f0b42918",
-      green:"#3fb950", greenDim:"#3fb95018",
-      red:"#f85149", redDim:"#f8514918",
-      blue:"#58a6ff",
-      text:"#e6edf3", muted:"#768390", faint:"#3d444d",
+      green:"#3fb950",  greenDim:"#3fb95018",
+      red:"#f85149",    redDim:"#f8514918",
+      blue:"#58a6ff",   blueDim:"#58a6ff18",
+      text:"#e6edf3",   muted:"#768390",   faint:"#3d444d",
     };
 
-    const fmtPrice = (n) => {
-      if (n == null) return "—";
-      const parts = Number(n).toFixed(2).split(".");
-      return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".") + "," + parts[1];
+    const fmt = (n) =>
+      n == null ? "—" : "$" + Number(n).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2});
+
+    const fmtDate = (iso) => {
+      if (!iso) return null;
+      const d = new Date(iso);
+      return d.toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"2-digit"})
+           + " " + d.toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"});
     };
 
-    const getPrice = (v) => {
-      if (Array.isArray(v.stores) && v.stores.length > 0) {
-        const sp = v.stores[0];
-        if (sp.price != null) return sp.price;
-      }
-      if (v.default_price != null) return v.default_price;
-      if (v.price != null)         return v.price;
-      return null;
+    const daysSince = (iso) => {
+      if (!iso) return null;
+      const diff = Date.now() - new Date(iso).getTime();
+      return Math.floor(diff / (1000 * 60 * 60 * 24));
     };
 
-    // ── render labels into the print div ────────────────────────────────────
-    function renderPrintArea(selectedItems) {
-      const printDiv = document.getElementById("print-area");
-      const COLS = 4, ROWS = 8, PER_PAGE = COLS * ROWS;
+    const loadJSON = (key, fallback) => {
+      try { return JSON.parse(localStorage.getItem(key) || "null") ?? fallback; }
+      catch { return fallback; }
+    };
+    const saveJSON = (key, val) => localStorage.setItem(key, JSON.stringify(val));
 
-      let html = "";
-      for (let p = 0; p < Math.ceil(selectedItems.length / PER_PAGE); p++) {
-        const pageItems = selectedItems.slice(p * PER_PAGE, (p + 1) * PER_PAGE);
-        // pad to fill grid
-        while (pageItems.length < PER_PAGE) pageItems.push(null);
-
-        html += `<div class="label-sheet">`;
-        for (const item of pageItems) {
-          if (!item) {
-            html += `<div class="label" style="border:0.5px dashed #eee;"></div>`;
-          } else {
-            const price = fmtPrice(item.price);
-            html += `
-              <div class="label">
-                <div class="label-name">${item.name}</div>
-                <hr class="label-sep">
-                <div class="label-price"><span class="label-price-sym">$</span>${price}</div>
-              </div>`;
-          }
+    // ── snapshot: detecta cambios de precio automáticamente ──────────────────
+    function applySnapshot(flatItems, prevHistory) {
+      const snapshot   = loadJSON(LS_SNAPSHOT, {});
+      const now        = new Date().toISOString();
+      const newSnap    = {};
+      const newHistory = { ...prevHistory };
+      for (const item of flatItems) {
+        const vid = item.variantId;
+        newSnap[vid] = item.price;
+        if (snapshot[vid] !== undefined && snapshot[vid] !== item.price) {
+          newHistory[vid] = { price: item.price, changedAt: now };
         }
-        html += `</div>`;
+        if (!newHistory[vid]) {
+          newHistory[vid] = { price: item.price, changedAt: null };
+        }
       }
-      printDiv.innerHTML = html;
+      saveJSON(LS_SNAPSHOT, newSnap);
+      saveJSON(LS_HISTORY, newHistory);
+      return newHistory;
     }
 
-    function App() {
-      const [token,    setToken]    = useState("");
-      const [loading,  setLoading]  = useState(false);
-      const [error,    setError]    = useState("");
-      const [items,    setItems]    = useState([]);
-      const [selected, setSelected] = useState(new Set());
-      const [filter,   setFilter]   = useState("");
-      const [catFilter,setCatFilter]= useState("todas");
-      const [catMap,   setCatMap]   = useState({});
+    // ── PDF por categoría (proveedor), orden alfabético dentro de cada una ───
+    function exportPDF(items, catMap, pct, roundTo, history, manual, indec) {
+      const { jsPDF } = window.jspdf;
+      const doc   = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pageW = doc.internal.pageSize.getWidth();
+      const now   = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
 
+      const calc = (price) => {
+        if (price == null) return null;
+        const raw = price * (1 + pct / 100);
+        return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
+      };
+      const ar = (n) => n == null ? "—" : "$" + Number(n).toLocaleString("es-AR",{minimumFractionDigits:2,maximumFractionDigits:2});
+
+      // ── portada / encabezado ─────────────────────────────────────────────
+      doc.setFillColor(28,34,48);
+      doc.rect(0,0,pageW,38,"F");
+      doc.setTextColor(240,180,41);
+      doc.setFontSize(17); doc.setFont("helvetica","bold");
+      doc.text("Control de Precios · Lista de ajuste", 14, 13);
+      doc.setTextColor(180,190,200);
+      doc.setFontSize(8); doc.setFont("helvetica","normal");
+      doc.text(`Inflación aplicada: +${pct}%   ·   Generado: ${now}   ·   Total productos: ${items.length}`, 14, 21);
+      if (indec) doc.text(`IPC INDEC último dato: ${indec.valor}% (${indec.fecha})`, 14, 28);
+
+      // ── agrupar por categoría y ordenar ──────────────────────────────────
+      const groups = {};
+      for (const item of items) {
+        const catName = catMap[item.categoryId] || "Sin categoría";
+        if (!groups[catName]) groups[catName] = [];
+        groups[catName].push(item);
+      }
+      // orden alfabético de categorías
+      const sortedCats = Object.keys(groups).sort((a,b) => a.localeCompare(b));
+
+      // totales generales
+      const totalActual   = items.reduce((s,i) => s+(i.price||0), 0);
+      const totalSugerido = items.reduce((s,i) => s+(calc(i.price)||0), 0);
+
+      let startY = 42;
+
+      for (const catName of sortedCats) {
+        const catItems = groups[catName].slice().sort((a,b) => a.name.localeCompare(b.name));
+
+        const catActual   = catItems.reduce((s,i) => s+(i.price||0), 0);
+        const catSugerido = catItems.reduce((s,i) => s+(calc(i.price)||0), 0);
+
+        const rows = catItems.map(item => {
+          const sp   = calc(item.price);
+          const diff = sp != null && item.price != null ? sp - item.price : null;
+          const dp   = item.price && sp ? ((sp-item.price)/item.price*100).toFixed(1)+"%" : "—";
+          const h    = history[item.variantId];
+          const upd  = h?.changedAt ? fmtDate(h.changedAt) : "Sin cambios";
+          return [
+            item.name,
+            item.price != null ? ar(item.price) : "—",
+            sp != null ? ar(sp) : "—",
+            diff != null ? "+"+ar(diff) : "—",
+            dp,
+            upd,
+          ];
+        });
+
+        doc.autoTable({
+          startY,
+          head: [[
+            { content: `📦 ${catName}  (${catItems.length} productos)`, colSpan: 6,
+              styles: { fillColor:[28,34,48], textColor:[240,180,41], fontStyle:"bold", fontSize:10, cellPadding:4 } },
+          ],[
+            "Producto","Precio actual","Precio sugerido","Diferencia","% subida","Últ. cambio"
+          ]],
+          body: rows,
+          foot: [[
+            { content:`Subtotal ${catName}`, styles:{fontStyle:"bold"} },
+            { content: ar(catActual),   styles:{halign:"right",fontStyle:"bold"} },
+            { content: ar(catSugerido), styles:{halign:"right",fontStyle:"bold",textColor:[63,185,80]} },
+            { content: "+"+ar(catSugerido-catActual), styles:{halign:"right",fontStyle:"bold",textColor:[63,185,80]} },
+            "","",
+          ]],
+          theme: "grid",
+          styles: { fontSize:8, cellPadding:2.5, textColor:[30,34,48] },
+          headStyles: { fillColor:[45,55,80], textColor:[200,210,230], fontStyle:"bold", fontSize:8 },
+          footStyles: { fillColor:[235,245,235], textColor:[20,20,20] },
+          alternateRowStyles: { fillColor:[245,247,250] },
+          columnStyles:{
+            0:{ cellWidth:62 },
+            1:{ halign:"right", cellWidth:26 },
+            2:{ halign:"right", cellWidth:26 },
+            3:{ halign:"right", cellWidth:26 },
+            4:{ halign:"center", cellWidth:16 },
+            5:{ cellWidth:37, fontSize:7 },
+          },
+          margin: { top: 14 },
+          didDrawPage: (data) => { startY = data.cursor.y; },
+        });
+
+        startY = doc.lastAutoTable.finalY + 6;
+      }
+
+      // ── fila de totales generales ─────────────────────────────────────────
+      doc.autoTable({
+        startY,
+        body: [[
+          { content:"TOTAL GENERAL", styles:{fontStyle:"bold",fontSize:9} },
+          { content: ar(totalActual),   styles:{halign:"right",fontStyle:"bold",fontSize:9} },
+          { content: ar(totalSugerido), styles:{halign:"right",fontStyle:"bold",fontSize:9,textColor:[63,185,80]} },
+          { content: "+"+ar(totalSugerido-totalActual), styles:{halign:"right",fontStyle:"bold",fontSize:9,textColor:[63,185,80]} },
+          "","",
+        ]],
+        theme:"grid",
+        styles:{ fillColor:[240,180,41], textColor:[20,20,20], cellPadding:3 },
+        columnStyles:{
+          0:{ cellWidth:62 },
+          1:{ cellWidth:26 },
+          2:{ cellWidth:26 },
+          3:{ cellWidth:26 },
+          4:{ cellWidth:16 },
+          5:{ cellWidth:37 },
+        },
+      });
+
+      // ── numeración de páginas ─────────────────────────────────────────────
+      const pageCount = doc.internal.getNumberOfPages();
+      for (let i=1; i<=pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8); doc.setTextColor(160,160,160);
+        doc.text(`Pág. ${i} de ${pageCount}`, pageW-14, doc.internal.pageSize.getHeight()-8, {align:"right"});
+      }
+
+      doc.save(`precios_sugeridos_${pct}pct_${now.replace(/\//g,"-")}.pdf`);
+    }
+
+    // ── exportar etiquetas de góndola (4×8 por hoja A4) ─────────────────────
+    function exportLabels(items, catMap, manual, history, dayFilter, useManual) {
+      const { jsPDF } = window.jspdf;
+
+      // filtrar por fecha según modo
+      const cutoff = dayFilter > 0 ? Date.now() - dayFilter * 86400000 : 0;
+      const toExport = items.filter(item => {
+        if (dayFilter === 0) return true; // todos
+        if (useManual) {
+          const d = manual[item.variantId];
+          return d && new Date(d).getTime() >= cutoff;
+        } else {
+          const d = history[item.variantId]?.changedAt;
+          return d && new Date(d).getTime() >= cutoff;
+        }
+      });
+
+      if (toExport.length === 0) {
+        alert("No hay productos actualizados en ese período.");
+        return;
+      }
+
+      const fmtPrice = (n) => {
+        if (n == null) return "—";
+        const parts = Number(n).toFixed(2).split(".");
+        return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".") + "," + parts[1];
+      };
+
+      const doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" });
+
+      const PAGE_W = 210, PAGE_H = 297;
+      const MARGIN = 8;
+      const COLS = 4, ROWS = 8, PER_PAGE = COLS * ROWS;
+      const GAP = 2;
+      const LABEL_W = (PAGE_W - MARGIN*2 - GAP*(COLS-1)) / COLS;
+      const LABEL_H = (PAGE_H - MARGIN*2 - GAP*(ROWS-1)) / ROWS;
+
+      const now = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
+
+      for (let i = 0; i < toExport.length; i++) {
+        const posInPage = i % PER_PAGE;
+        if (posInPage === 0 && i > 0) doc.addPage();
+
+        const col = posInPage % COLS;
+        const row = Math.floor(posInPage / COLS);
+        const x = MARGIN + col * (LABEL_W + GAP);
+        const y = MARGIN + row * (LABEL_H + GAP);
+
+        const item = toExport[i];
+
+        // border
+        doc.setDrawColor(160,160,160);
+        doc.setLineWidth(0.3);
+        doc.rect(x, y, LABEL_W, LABEL_H);
+
+        const PAD = 2;
+        const textW = LABEL_W - PAD * 2;
+
+        // name
+        doc.setFont("helvetica","bold");
+        doc.setFontSize(6.5);
+        const NAME_LH = 3.1;
+        const allNameLines = doc.splitTextToSize(item.name.toUpperCase(), textW);
+        const nameLines = allNameLines.slice(0, 3);
+        const nameBlockH = nameLines.length * NAME_LH;
+
+        const SEP_GAP = 1.2, SEP_H = 0.3, PRICE_LH = 5.5, SEP_BELOW = 1.2;
+        const totalBlockH = nameBlockH + SEP_GAP + SEP_H + SEP_BELOW + PRICE_LH;
+        const blockTop = y + (LABEL_H - totalBlockH) / 2;
+
+        doc.setTextColor(50,50,50);
+        doc.text(nameLines, x + LABEL_W/2, blockTop + NAME_LH, { align:"center", lineHeightFactor:1.0 });
+
+        // separator
+        const sepY = blockTop + nameBlockH + SEP_GAP;
+        doc.setDrawColor(200,200,200);
+        doc.setLineWidth(0.2);
+        const sepInset = LABEL_W * 0.15;
+        doc.line(x + sepInset, sepY, x + LABEL_W - sepInset, sepY);
+
+        // price
+        const price = fmtPrice(item.price);
+        const priceY = sepY + SEP_H + SEP_BELOW + PRICE_LH - 0.5;
+        doc.setTextColor(0,0,0);
+        doc.setFont("helvetica","bold");
+        doc.setFontSize(7);
+        const symW = doc.getTextWidth("$");
+        doc.setFontSize(14);
+        const numW = doc.getTextWidth(price);
+        const totalPriceW = symW + 0.5 + numW;
+        const priceStartX = x + (LABEL_W - totalPriceW) / 2;
+        doc.setFontSize(7);
+        doc.text("$", priceStartX, priceY - 1.8);
+        doc.setFontSize(14);
+        doc.text(price, priceStartX + symW + 0.5, priceY);
+      }
+
+      // page numbers
+      const pageCount = doc.internal.getNumberOfPages();
+      for (let i=1; i<=pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(7); doc.setTextColor(180,180,180);
+        doc.text(
+          `Etiquetas · ${toExport.length} productos · ${now}  ·  Pág. ${i}/${pageCount}`,
+          PAGE_W/2, PAGE_H - 4, { align:"center" }
+        );
+      }
+
+      doc.save(`etiquetas_gondola_${now.replace(/\//g,"-")}.pdf`);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    function App() {
+      const [token,     setToken]     = useState("ea72d0bcfe4a438aad213a106c9aea46");
+      const [inflation, setInflation] = useState("");
+      const [rounding,  setRounding]  = useState("10");
+      const [loading,   setLoading]   = useState(false);
+      const [error,     setError]     = useState("");
+      const [items,     setItems]     = useState([]);
+      const [catMap,    setCatMap]    = useState({});  // { categoryId: categoryName }
+      const [filter,    setFilter]    = useState("");
+      const [catFilter, setCatFilter] = useState("todas");
+      const [sortBy,    setSortBy]    = useState("category");
+      const [sortDir,   setSortDir]   = useState(1);
+      const [history,   setHistory]   = useState(() => loadJSON(LS_HISTORY, {}));
+      const [manual,    setManual]    = useState(() => loadJSON(LS_MANUAL, {}));
+      const [indec,     setIndec]     = useState(null);
+      const [indecLoad, setIndecLoad] = useState(false);
+      const [labelDays, setLabelDays] = useState(1);   // 0 = todos
+      const [labelMode, setLabelMode] = useState("manual"); // "manual" | "auto"
+
+      const pct     = parseFloat(inflation) || 0;
+      const roundTo = parseFloat(rounding)  || 1;
+
+      const suggested = (price) => {
+        if (price == null) return null;
+        const raw = price * (1 + pct / 100);
+        return roundTo > 1 ? Math.ceil(raw / roundTo) * roundTo : Math.round(raw * 100) / 100;
+      };
+
+      // ── auto-fetch products on mount ─────────────────────────────────────
+      useEffect(() => { fetchProducts(); }, []);
+
+      // ── fetch INDEC ───────────────────────────────────────────────────────
+      useEffect(() => {
+        setIndecLoad(true);
+        fetch(INDEC_API)
+          .then(r=>r.json())
+          .then(data => {
+            if (Array.isArray(data) && data.length > 0) {
+              const last = data[data.length-1];
+              const d    = new Date(last.fecha+"T12:00:00");
+              const mes  = d.toLocaleDateString("es-AR",{month:"long",year:"numeric"});
+              setIndec({ valor: last.valor, fecha: mes });
+              setInflation(String(last.valor));
+            }
+          })
+          .catch(()=>{})
+          .finally(()=>setIndecLoad(false));
+      }, []);
+
+      // ── fetch productos + categorías ──────────────────────────────────────
       const fetchProducts = useCallback(async () => {
         if (!token.trim()) { setError("Ingresá tu token de Loyverse."); return; }
-        setLoading(true); setError(""); setItems([]); setSelected(new Set());
+        setLoading(true); setError(""); setItems([]);
         try {
+          // 1. categorías
           const catRes  = await fetch(`${API_BASE}/categories?limit=250`, {
             headers:{ Authorization:`Bearer ${token.trim()}` }
           });
@@ -173,6 +390,7 @@
           for (const c of catData.categories || []) cm[c.id] = c.name;
           setCatMap(cm);
 
+          // 2. productos (paginado)
           let all = [], cursor = null;
           do {
             const url = `${API_BASE}/items?limit=250` + (cursor ? `&cursor=${cursor}` : "");
@@ -183,174 +401,162 @@
             cursor = data.cursor || null;
           } while (cursor);
 
+          // El precio real esta en v.stores[0].price (precio del local)
+          // default_price es el precio base pero stores sobrescribe por local
+          const getPrice = (v) => {
+            if (Array.isArray(v.stores) && v.stores.length > 0) {
+              const sp = v.stores[0];
+              if (sp.price != null) return sp.price;
+            }
+            if (v.default_price != null) return v.default_price;
+            if (v.price != null)         return v.price;
+            return null;
+          };
+
           const flat = [];
           for (const item of all)
-            for (const v of item.variants || [])
+            for (const v of item.variants || []) {
+              const vid = v.variant_id || v.id;  // Loyverse usa variant_id, no id
               flat.push({
-                variantId: v.variant_id || v.id,
-                name: item.item_name,
+                id:item.id, variantId:vid, name:item.item_name,
                 categoryId: item.category_id || null,
-                price: getPrice(v),
+                price: getPrice(v), cost:v.cost??null, sku:v.sku||""
               });
+            }
 
-          flat.sort((a,b) => a.name.localeCompare(b.name));
+          const updatedHistory = applySnapshot(flat, loadJSON(LS_HISTORY, {}));
+          setHistory(updatedHistory);
           setItems(flat);
         } catch(e) { setError(e.message); }
         finally    { setLoading(false); }
       }, [token]);
 
-      const cats = ["todas", ...Object.values(catMap).sort((a,b)=>a.localeCompare(b))];
-
-      const filtered = items.filter(i => {
-        const matchCat = catFilter === "todas" || catMap[i.categoryId] === catFilter;
-        const matchQ   = !filter || i.name.toLowerCase().includes(filter.toLowerCase());
-        return matchCat && matchQ;
-      });
-
-      const allChecked  = filtered.length > 0 && filtered.every(i => selected.has(i.variantId));
-      const someChecked = filtered.some(i => selected.has(i.variantId)) && !allChecked;
-
-      const toggleAll = () => {
-        const ids = filtered.map(i => i.variantId);
-        if (allChecked) setSelected(prev => { const s=new Set(prev); ids.forEach(id=>s.delete(id)); return s; });
-        else            setSelected(prev => { const s=new Set(prev); ids.forEach(id=>s.add(id)); return s; });
-      };
-      const toggle = (id) => setSelected(prev => {
-        const s=new Set(prev); s.has(id)?s.delete(id):s.add(id); return s;
-      });
-
-      const handlePrint = () => {
-        const toPrint = items.filter(i => selected.has(i.variantId));
-        if (!toPrint.length) return;
-        renderPrintArea(toPrint);
-        window.print();
+      // ── marcar precio actualizado manualmente ───────────────────────────────
+      const markUpdated = (variantId) => {
+        const now = new Date().toISOString();
+        setManual(prev => {
+          const next = { ...prev, [variantId]: now };
+          saveJSON(LS_MANUAL, next);
+          return next;
+        });
       };
 
-      const handleExportPDF = () => {
-        const toPrint = items.filter(i => selected.has(i.variantId));
-        if (!toPrint.length) return;
-
-        const { jsPDF } = window.jspdf;
-        const doc = new jsPDF({ orientation:"portrait", unit:"mm", format:"a4" });
-
-        const PAGE_W = 210, PAGE_H = 297;
-        const MARGIN = 8;
-        const COLS = 4, ROWS = 8;
-        const PER_PAGE = COLS * ROWS;
-        const GAP = 2;
-        const LABEL_W = (PAGE_W - MARGIN*2 - GAP*(COLS-1)) / COLS;
-        const LABEL_H = (PAGE_H - MARGIN*2 - GAP*(ROWS-1)) / ROWS;
-
-        let page = 0;
-        for (let i = 0; i < toPrint.length; i++) {
-          const posInPage = i % PER_PAGE;
-          if (posInPage === 0 && i > 0) {
-            doc.addPage();
-            page++;
-          }
-          const col = posInPage % COLS;
-          const row = Math.floor(posInPage / COLS);
-          const x = MARGIN + col * (LABEL_W + GAP);
-          const y = MARGIN + row * (LABEL_H + GAP);
-
-          const item = toPrint[i];
-
-          // ── border ──────────────────────────────────────────────────────────
-          doc.setDrawColor(160,160,160);
-          doc.setLineWidth(0.3);
-          doc.rect(x, y, LABEL_W, LABEL_H);
-
-          // ── measure text blocks ──────────────────────────────────────────────
-          const PAD = 2;            // horizontal inner padding (mm each side)
-          const textW = LABEL_W - PAD * 2;
-
-          // Name: up to 3 lines at 6.5pt → line-height ~3.1mm
-          doc.setFont("helvetica","bold");
-          doc.setFontSize(6.5);
-          const NAME_LH = 3.1;
-          const allNameLines = doc.splitTextToSize(item.name.toUpperCase(), textW);
-          const nameLines = allNameLines.slice(0, 3);
-          const nameBlockH = nameLines.length * NAME_LH;
-
-          // Price: 14pt → ~5mm cap-height; separator line: 1mm gap above + 0.3mm + 1mm gap below
-          const SEP_GAP = 1.2;      // gap above separator
-          const SEP_H   = 0.3;      // separator line thickness (visual)
-          const PRICE_LH = 5.5;     // approx height for 14pt text
-          const SEP_BELOW = 1.2;    // gap below separator
-
-          const totalBlockH = nameBlockH + SEP_GAP + SEP_H + SEP_BELOW + PRICE_LH;
-
-          // vertical start so the block is centred in the label
-          const blockTop = y + (LABEL_H - totalBlockH) / 2;
-
-          // ── product name ────────────────────────────────────────────────────
-          doc.setFont("helvetica","bold");
-          doc.setFontSize(6.5);
-          doc.setTextColor(50, 50, 50);
-          // baseline of first line
-          const nameY = blockTop + NAME_LH;
-          doc.text(nameLines, x + LABEL_W / 2, nameY, { align: "center", lineHeightFactor: 1.0 });
-
-          // ── separator ───────────────────────────────────────────────────────
-          const sepY = blockTop + nameBlockH + SEP_GAP;
-          doc.setDrawColor(200, 200, 200);
-          doc.setLineWidth(0.2);
-          const sepInset = LABEL_W * 0.15;
-          doc.line(x + sepInset, sepY, x + LABEL_W - sepInset, sepY);
-
-          // ── price ───────────────────────────────────────────────────────────
-          const price = fmtPrice(item.price);
-          const priceY = sepY + SEP_H + SEP_BELOW + PRICE_LH - 0.5;
-
-          // currency symbol (small, superscript-like)
-          doc.setFont("helvetica","bold");
-          doc.setFontSize(7);
-          doc.setTextColor(0, 0, 0);
-          const symW = doc.getTextWidth("$");
-          // price number
-          doc.setFont("helvetica","bold");
-          doc.setFontSize(14);
-          const numW = doc.getTextWidth(price);
-          const totalPriceW = symW + 0.5 + numW;
-          const priceStartX = x + (LABEL_W - totalPriceW) / 2;
-
-          doc.setFontSize(7);
-          doc.text("$", priceStartX, priceY - 1.8);          // raised symbol
-          doc.setFontSize(14);
-          doc.text(price, priceStartX + symW + 0.5, priceY); // number baseline
-        }
-
-        const now = new Date().toLocaleDateString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric"});
-        doc.save(`etiquetas_gondola_${now.replace(/\//g,"-")}.pdf`);
+      const unmarkUpdated = (variantId) => {
+        setManual(prev => {
+          const next = { ...prev };
+          delete next[variantId];
+          saveJSON(LS_MANUAL, next);
+          return next;
+        });
       };
 
+      // ── sort & filter ─────────────────────────────────────────────────────
+      const handleSort = (col) => {
+        if (sortBy===col) setSortDir(d=>-d);
+        else { setSortBy(col); setSortDir(1); }
+      };
+
+      const getCatName = (id) => catMap[id] || "Sin categoría";
+
+      const sortedCatNames = ["todas", ...Object.values(catMap).sort((a,b)=>a.localeCompare(b))];
+
+      const filtered = items
+        .filter(i => {
+          const matchCat = catFilter === "todas" || getCatName(i.categoryId) === catFilter;
+          const matchQ   = !filter || i.name.toLowerCase().includes(filter.toLowerCase()) || i.sku.toLowerCase().includes(filter.toLowerCase());
+          return matchCat && matchQ;
+        })
+        .sort((a,b) => {
+          let va = a[sortBy], vb = b[sortBy];
+          if (sortBy==="suggested") { va=suggested(a.price); vb=suggested(b.price); }
+          if (sortBy==="diff")      { va=(suggested(a.price)||0)-(a.price||0); vb=(suggested(b.price)||0)-(b.price||0); }
+          if (sortBy==="changed")   { va=history[a.variantId]?.changedAt||""; vb=history[b.variantId]?.changedAt||""; }
+          if (sortBy==="manual")    { va=manual[a.variantId]||""; vb=manual[b.variantId]||""; }
+          if (sortBy==="category")  { va=getCatName(a.categoryId); vb=getCatName(b.categoryId); }
+          if (va==null) return 1; if (vb==null) return -1;
+          const cmp = typeof va==="string" ? va.localeCompare(vb) : (va-vb);
+          if (cmp !== 0) return cmp * sortDir;
+          // secondary: alphabetical by name
+          return a.name.localeCompare(b.name);
+        });
+
+      const totalCurrent   = items.reduce((s,i)=>s+(i.price||0),0);
+      const totalSuggested = items.reduce((s,i)=>s+(suggested(i.price)||0),0);
+
+      // ── style helpers ─────────────────────────────────────────────────────
       const inp = (extra={}) => ({
         background:C.surface, border:`1px solid ${C.border}`, borderRadius:"8px",
         padding:"10px 13px", color:C.text, fontSize:"13px",
         fontFamily:"'IBM Plex Mono','Fira Code',monospace", outline:"none", width:"100%", ...extra,
       });
+      const Th = ({col,label,right}) => (
+        <th onClick={()=>handleSort(col)} style={{
+          padding:"10px 14px", fontSize:"11px",
+          color:sortBy===col?C.accent:C.muted,
+          letterSpacing:"1.2px", textTransform:"uppercase",
+          textAlign:right?"right":"left",
+          borderBottom:`1px solid ${C.border}`,
+          cursor:"pointer", userSelect:"none", whiteSpace:"nowrap",
+          background:C.card, position:"sticky", top:0, zIndex:1,
+        }}>
+          {label} {sortBy===col?(sortDir===1?"↑":"↓"):""}
+        </th>
+      );
+      const pill = (text,color,bg) => (
+        <span style={{background:bg,color,border:`1px solid ${color}44`,borderRadius:"5px",padding:"2px 8px",fontSize:"11px",fontWeight:600}}>
+          {text}
+        </span>
+      );
+
+      // agrupar items filtrados para mostrar separadores de categoría en tabla
+      let lastCat = null;
 
       return (
         <div style={{minHeight:"100vh",background:C.bg,color:C.text,fontFamily:"'IBM Plex Mono','Fira Code',monospace"}}>
 
           {/* HEADER */}
           <div style={{background:C.surface,borderBottom:`1px solid ${C.border}`,padding:"18px 28px",display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
-            <span style={{fontSize:"20px"}}>🏷</span>
+            <span style={{fontSize:"20px"}}>📊</span>
             <div>
-              <div style={{fontSize:"18px",fontWeight:700,color:C.accent}}>Etiquetas de Góndola</div>
-              <div style={{fontSize:"11px",color:C.muted,marginTop:"1px"}}>Loyverse · Impresión A4 · 32 etiquetas por hoja</div>
+              <div style={{fontSize:"18px",fontWeight:700,color:C.accent}}>Control de Precios</div>
+              <div style={{fontSize:"11px",color:C.muted,marginTop:"1px"}}>Loyverse · Ajuste por inflación · Solo lectura</div>
             </div>
             {items.length > 0 && (
               <div style={{marginLeft:"auto",background:C.accentDim,border:`1px solid ${C.accent}44`,borderRadius:"8px",padding:"6px 14px",fontSize:"12px",color:C.accent}}>
-                {selected.size} seleccionadas
+                {items.length} productos · {Object.keys(catMap).length} categorías
               </div>
             )}
           </div>
 
-          <div style={{maxWidth:"900px",margin:"0 auto",padding:"24px 16px"}}>
+          <div style={{maxWidth:"1100px",margin:"0 auto",padding:"24px 16px"}}>
 
-            {/* CONFIG */}
-            <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",padding:"20px",marginBottom:"20px"}}>
+            {/* INDEC BANNER */}
+            <div style={{
+              background:indec?C.blueDim:C.card,
+              border:`1px solid ${indec?C.blue+"66":C.border}`,
+              borderRadius:"10px", padding:"14px 18px", marginBottom:"16px",
+              display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap",
+            }}>
+              <span style={{fontSize:"18px"}}>🏛</span>
+              <div>
+                <div style={{fontSize:"11px",color:C.muted,letterSpacing:"1px",textTransform:"uppercase",marginBottom:"3px"}}>
+                  IPC INDEC · Último dato oficial
+                </div>
+                {indecLoad
+                  ? <div style={{fontSize:"13px",color:C.muted}}>Cargando dato oficial...</div>
+                  : indec
+                    ? <div style={{display:"flex",alignItems:"baseline",gap:"10px",flexWrap:"wrap"}}>
+                        <span style={{fontSize:"26px",fontWeight:700,color:C.blue}}>+{indec.valor}%</span>
+                        <span style={{fontSize:"13px",color:C.muted}}>{indec.fecha} · Fuente: INDEC vía ArgentinaDatos</span>
+                      </div>
+                    : <div style={{fontSize:"13px",color:C.muted}}>No se pudo cargar el dato del INDEC</div>
+                }
+              </div>
+              {indec && <div style={{marginLeft:"auto",fontSize:"11px",color:C.muted,textAlign:"right"}}><div>Precargado</div><div>en el campo ↓</div></div>}
+            </div>
+
+            {/* CONFIG - hidden, token hardcoded */}
+            <div style={{display:"none"}}>
               <div style={{fontSize:"11px",color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginBottom:"14px"}}>⚙ Configuración</div>
               <div style={{display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"flex-end"}}>
                 <div style={{flex:2,minWidth:"220px",display:"flex",flexDirection:"column",gap:"5px"}}>
@@ -358,6 +564,21 @@
                   <input type="password" placeholder="Pegá tu token aquí..." value={token}
                     onChange={e=>setToken(e.target.value)}
                     onKeyDown={e=>e.key==="Enter"&&fetchProducts()}
+                    style={inp()} />
+                </div>
+                <div style={{flex:1,minWidth:"120px",display:"flex",flexDirection:"column",gap:"5px"}}>
+                  <label style={{fontSize:"11px",color:C.muted}}>
+                    Inflación a aplicar (%)
+                    {indec && <span style={{color:C.blue,marginLeft:"6px",fontSize:"10px"}}>← INDEC</span>}
+                  </label>
+                  <input type="number" min="0" step="0.1" placeholder="ej: 5" value={inflation}
+                    onChange={e=>setInflation(e.target.value)}
+                    style={inp({border:`1px solid ${C.accent}66`,color:C.accent,fontSize:"15px",fontWeight:700})} />
+                </div>
+                <div style={{flex:1,minWidth:"120px",display:"flex",flexDirection:"column",gap:"5px"}}>
+                  <label style={{fontSize:"11px",color:C.muted}}>Redondear al múltiplo de $</label>
+                  <input type="number" min="1" step="1" placeholder="ej: 10" value={rounding}
+                    onChange={e=>setRounding(e.target.value)}
                     style={inp()} />
                 </div>
                 <button onClick={fetchProducts} disabled={loading}
@@ -370,76 +591,157 @@
                   ⚠ {error}
                 </div>
               )}
+              <div style={{marginTop:"10px",fontSize:"11px",color:C.faint}}>
+                Token en Loyverse Back Office → Configuración → Acceso API →{" "}
+                <a href="https://help.loyverse.com/help/loyverse-api" target="_blank" rel="noreferrer">Ver guía</a>
+                {"   ·   "}
+                <span style={{color:C.green}}>🔒 Solo lectura · Cambios de precio detectados automáticamente</span>
+              </div>
             </div>
 
-            {/* FILTERS + PRINT BAR */}
+            {/* SUMMARY CARDS */}
+            {items.length > 0 && pct > 0 && (
+              <div style={{display:"flex",gap:"10px",marginBottom:"16px",flexWrap:"wrap"}}>
+                {[
+                  {label:"Inflación aplicada",  value:`+${pct}%`,                      color:C.accent, bg:C.accentDim},
+                  {label:"Total actual",         value:fmt(totalCurrent),                color:C.muted,  bg:C.card},
+                  {label:"Total sugerido",       value:fmt(totalSuggested),              color:C.green,  bg:C.greenDim},
+                  {label:"Diferencia total",     value:fmt(totalSuggested-totalCurrent), color:C.accent, bg:C.accentDim},
+                ].map(({label,value,color,bg})=>(
+                  <div key={label} style={{flex:1,minWidth:"140px",background:bg,border:`1px solid ${color}33`,borderRadius:"12px",padding:"14px 16px"}}>
+                    <div style={{fontSize:"11px",color:C.muted,marginBottom:"5px"}}>{label}</div>
+                    <div style={{fontSize:"18px",fontWeight:700,color}}>{value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* TOOLBAR */}
             {items.length > 0 && (
-              <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"center"}}>
+              <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"12px 16px",marginBottom:"14px",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
+                <select value={catFilter} onChange={e=>setCatFilter(e.target.value)}
+                  style={{...inp({fontSize:"12px",padding:"7px 12px"}),width:"180px",cursor:"pointer"}}>
+                  {sortedCatNames.map(c=>(
+                    <option key={c} value={c}>{c==="todas"?"Todos los proveedores":c}</option>
+                  ))}
+                </select>
                 <input placeholder="Buscar producto..." value={filter}
                   onChange={e=>setFilter(e.target.value)}
                   style={inp({fontSize:"12px",padding:"7px 12px",width:"180px"})} />
-                <select value={catFilter} onChange={e=>setCatFilter(e.target.value)}
-                  style={{...inp({fontSize:"12px",padding:"7px 12px",width:"160px"}),cursor:"pointer"}}>
-                  {cats.map(c=><option key={c} value={c}>{c==="todas"?"Todos los proveedores":c}</option>)}
-                </select>
                 <span style={{fontSize:"12px",color:C.muted}}>
-                  {filtered.length} productos
+                  {filtered.length!==items.length?`${filtered.length} de ${items.length}`:`${items.length}`} productos
                 </span>
-                <div style={{marginLeft:"auto",display:"flex",gap:"8px"}}>
-                  <button onClick={toggleAll}
-                    style={{background:C.surface,color:C.text,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"8px 14px",fontFamily:"inherit",fontSize:"12px",fontWeight:600,cursor:"pointer"}}>
-                    {allChecked?"Deseleccionar todo":"Seleccionar todo"}
-                  </button>
-                  <button onClick={handleExportPDF} disabled={selected.size===0}
-                    style={{background:selected.size===0?C.faint:C.red,color:selected.size===0?C.muted:"#fff",border:"none",borderRadius:"8px",padding:"8px 18px",fontFamily:"inherit",fontSize:"13px",fontWeight:700,cursor:selected.size===0?"default":"pointer",whiteSpace:"nowrap"}}>
-                    📄 PDF ({selected.size})
+                <div style={{marginLeft:"auto", display:"flex", gap:"8px", alignItems:"center", flexWrap:"wrap"}}>
+                  {/* --- etiquetas --- */}
+                  <div style={{display:"flex",alignItems:"center",gap:"6px",background:C.card,border:`1px solid ${C.border}`,borderRadius:"8px",padding:"5px 10px"}}>
+                    <span style={{fontSize:"11px",color:C.muted,whiteSpace:"nowrap"}}>🏷 Etiquetas:</span>
+                    <select value={labelMode} onChange={e=>setLabelMode(e.target.value)}
+                      style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"5px",color:C.text,fontSize:"11px",padding:"3px 6px",fontFamily:"inherit",cursor:"pointer"}}>
+                      <option value="manual">Actualizadas manualmente</option>
+                      <option value="auto">Cambio de precio detectado</option>
+                      <option value="all">Todos los productos</option>
+                    </select>
+                    {labelMode !== "all" && (
+                      <select value={labelDays} onChange={e=>setLabelDays(Number(e.target.value))}
+                        style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"5px",color:C.accent,fontSize:"11px",padding:"3px 6px",fontFamily:"inherit",cursor:"pointer",fontWeight:700}}>
+                        <option value={1}>hoy</option>
+                        <option value={2}>últimos 2 días</option>
+                        <option value={7}>última semana</option>
+                        <option value={30}>último mes</option>
+                      </select>
+                    )}
+                    <button
+                      onClick={()=>exportLabels(items, catMap, manual, history, labelMode==="all"?0:labelDays, labelMode==="manual")}
+                      style={{background:C.accentDim,color:C.accent,border:`1px solid ${C.accent}44`,borderRadius:"6px",padding:"4px 10px",fontFamily:"inherit",fontSize:"11px",fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                      ⬇ PDF
+                    </button>
+                  </div>
+                  {/* --- lista completa --- */}
+                  <button
+                    onClick={()=>exportPDF(items,catMap,pct,roundTo,history,manual,indec)}
+                    disabled={pct===0}
+                    title={pct===0?"Ingresá un % de inflación primero":"Exportar por categoría a PDF"}
+                    style={{
+                      background:pct===0?C.faint:C.red, color:pct===0?C.muted:"#fff",
+                      border:"none", borderRadius:"8px", padding:"9px 18px",
+                      fontFamily:"inherit", fontSize:"13px", fontWeight:700,
+                      cursor:pct===0?"default":"pointer", whiteSpace:"nowrap",
+                    }}>
+                    📄 Exportar PDF por proveedor
                   </button>
                 </div>
               </div>
             )}
 
-            {/* PRODUCT LIST */}
+            {/* TABLE con separadores de categoría */}
             {items.length > 0 && (
               <div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",overflow:"hidden"}}>
-                <div style={{overflowY:"auto",maxHeight:"560px"}}>
+                <div style={{overflowX:"auto",maxHeight:"600px",overflowY:"auto"}}>
                   <table style={{width:"100%",borderCollapse:"collapse"}}>
                     <thead>
                       <tr>
-                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,width:"40px"}}>
-                          <input type="checkbox" checked={allChecked}
-                            ref={el=>{if(el)el.indeterminate=someChecked;}}
-                            onChange={toggleAll} style={{cursor:"pointer"}} />
-                        </th>
-                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",textAlign:"left"}}>
-                          Producto
-                        </th>
-                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",textAlign:"left"}}>
-                          Proveedor
-                        </th>
-                        <th style={{padding:"10px 14px",background:C.card,position:"sticky",top:0,zIndex:1,borderBottom:`1px solid ${C.border}`,fontSize:"11px",color:C.muted,letterSpacing:"1.2px",textTransform:"uppercase",textAlign:"right"}}>
-                          Precio
-                        </th>
+                        <Th col="category"  label="Proveedor" />
+                        <Th col="name"      label="Producto" />
+                        <Th col="price"     label="Precio actual"      right />
+                        <Th col="suggested" label={`Sugerido +${pct}%`} right />
+                        <Th col="diff"      label="Diferencia"         right />
+                        <Th col="manual"    label="Actualización" />
                       </tr>
                     </thead>
                     <tbody>
-                      {filtered.map((item,idx)=>{
-                        const isSel = selected.has(item.variantId);
+                      {filtered.map((item,idx) => {
+                        const sp      = suggested(item.price);
+                        const diff    = sp!=null && item.price!=null ? sp-item.price : null;
+                        const dp      = item.price ? ((sp-item.price)/item.price)*100 : 0;
+
+                        const catName = getCatName(item.categoryId);
+
                         return (
                           <tr key={item.variantId}
-                            onClick={()=>toggle(item.variantId)}
-                            style={{background:isSel?C.accentDim:idx%2===0?"transparent":C.surface+"44",cursor:"pointer",transition:"background .1s"}}>
-                            <td style={{padding:"10px 14px",borderBottom:`1px solid ${C.border}22`,textAlign:"center"}}>
-                              <input type="checkbox" checked={isSel} onChange={()=>toggle(item.variantId)}
-                                onClick={e=>e.stopPropagation()} style={{cursor:"pointer"}} />
+                            style={{background:idx%2===0?"transparent":C.surface+"44"}}>
+                            <td style={{padding:"10px 14px",fontSize:"11px",color:C.blue,fontWeight:600,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap",maxWidth:"130px",overflow:"hidden",textOverflow:"ellipsis"}}>
+                              {catName}
                             </td>
                             <td style={{padding:"10px 14px",fontSize:"13px",fontWeight:600,color:C.text,borderBottom:`1px solid ${C.border}22`}}>
                               {item.name}
+                              {item.sku && <span style={{marginLeft:"8px",fontSize:"10px",color:C.faint,fontWeight:400}}>{item.sku}</span>}
                             </td>
-                            <td style={{padding:"10px 14px",fontSize:"12px",color:C.blue,borderBottom:`1px solid ${C.border}22`}}>
-                              {catMap[item.categoryId]||"Sin categoría"}
+                            <td style={{padding:"10px 14px",fontSize:"13px",textAlign:"right",color:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                              {fmt(item.price)}
                             </td>
-                            <td style={{padding:"10px 14px",fontSize:"13px",fontWeight:700,color:C.accent,textAlign:"right",borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
-                              ${fmtPrice(item.price)}
+                            <td style={{padding:"10px 14px",fontSize:"14px",fontWeight:700,textAlign:"right",color:pct>0?C.accent:C.text,borderBottom:`1px solid ${C.border}22`,whiteSpace:"nowrap"}}>
+                              {fmt(sp)}
+                            </td>
+                            <td style={{padding:"10px 14px",textAlign:"right",borderBottom:`1px solid ${C.border}22`}}>
+                              {diff!=null && pct>0 ? (
+                                <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:"3px"}}>
+                                  <span style={{fontSize:"13px",fontWeight:600,color:C.green,whiteSpace:"nowrap"}}>{fmt(diff)}</span>
+                                  {pill(`+${dp.toFixed(1)}%`,C.green,C.greenDim)}
+                                </div>
+                              ) : "—"}
+                            </td>
+                            <td style={{padding:"8px 10px",borderBottom:`1px solid ${C.border}22`,textAlign:"center",whiteSpace:"nowrap"}}>
+                              {manual[item.variantId] ? (
+                                <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"3px"}}>
+                                  <span style={{fontSize:"11px",color:C.green,fontWeight:700}}>
+                                    {fmtDate(manual[item.variantId])}
+                                  </span>
+                                  <span style={{fontSize:"10px",color:C.muted}}>
+                                    hace {daysSince(manual[item.variantId])} {daysSince(manual[item.variantId]) === 1 ? "día" : "días"}
+                                  </span>
+                                  <button
+                                    onClick={()=>markUpdated(item.variantId)}
+                                    style={{background:C.accentDim,border:`1px solid ${C.accent}44`,borderRadius:"5px",padding:"3px 8px",fontSize:"10px",fontWeight:700,color:C.accent,cursor:"pointer",fontFamily:"inherit",marginTop:"2px"}}>
+                                    ↺ Actualizar
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={()=>markUpdated(item.variantId)}
+                                  style={{background:C.greenDim,border:`1px solid ${C.green}44`,borderRadius:"6px",padding:"5px 10px",fontSize:"11px",fontWeight:700,color:C.green,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                                  ✓ Actualicé
+                                </button>
+                              )}
                             </td>
                           </tr>
                         );
@@ -447,7 +749,7 @@
                     </tbody>
                   </table>
                   {filtered.length===0 && (
-                    <div style={{textAlign:"center",padding:"40px",color:C.muted,fontSize:"13px"}}>
+                    <div style={{textAlign:"center",padding:"50px",color:C.muted,fontSize:"13px"}}>
                       No hay productos que coincidan.
                     </div>
                   )}
@@ -458,12 +760,13 @@
             {/* EMPTY STATE */}
             {!loading && items.length===0 && !error && (
               <div style={{background:C.card,border:`1px dashed ${C.border}`,borderRadius:"12px",padding:"60px 24px",textAlign:"center"}}>
-                <div style={{fontSize:"40px",marginBottom:"12px"}}>🏷</div>
+                <div style={{fontSize:"40px",marginBottom:"12px"}}>📦</div>
                 <div style={{fontSize:"15px",color:C.muted,marginBottom:"6px"}}>
-                  Ingresá tu token y traé los productos
+                  Ingresá tu token y presioná "Traer productos"
                 </div>
-                <div style={{fontSize:"12px",color:C.faint}}>
-                  Seleccioná los que querés etiquetar y presioná Imprimir
+                <div style={{fontSize:"12px",color:C.faint,lineHeight:"1.8"}}>
+                  🔒 Solo lectura · Cambios de precio detectados automáticamente<br/>
+                  📄 PDF exportado por proveedor en orden alfabético
                 </div>
               </div>
             )}
@@ -473,7 +776,7 @@
       );
     }
 
-    ReactDOM.createRoot(document.getElementById("app-ui")).render(<App />);
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
   </script>
 </body>
 </html>
