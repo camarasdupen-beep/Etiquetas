@@ -915,7 +915,134 @@
       );
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    const PIN          = "0084";        // ← cambiá este código
+    const SESSION_KEY  = "app_session";
+    const SESSION_MINS = 10;
+
+    const isSessionValid = () => {
+      try {
+        const t = parseInt(localStorage.getItem(SESSION_KEY) || "0");
+        return Date.now() - t < SESSION_MINS * 60 * 1000;
+      } catch { return false; }
+    };
+
+    const startSession = () => {
+      localStorage.setItem(SESSION_KEY, String(Date.now()));
+    };
+
+    function PinScreen({ onUnlock }) {
+      const [digits, setDigits]   = useState(["","","",""]);
+      const [error,  setError]    = useState(false);
+      const [shake,  setShake]    = useState(false);
+      const refs = [React.useRef(), React.useRef(), React.useRef(), React.useRef()];
+
+      const handleKey = (i, val) => {
+        if (!/^\d?$/.test(val)) return;
+        const next = [...digits];
+        next[i] = val;
+        setDigits(next);
+        setError(false);
+        if (val && i < 3) refs[i+1].current.focus();
+        if (next.every(d => d !== "")) {
+          const entered = next.join("");
+          if (entered === PIN) {
+            startSession();
+            onUnlock();
+          } else {
+            setShake(true);
+            setError(true);
+            setTimeout(() => {
+              setDigits(["","","",""]);
+              setShake(false);
+              refs[0].current.focus();
+            }, 600);
+          }
+        }
+      };
+
+      const handleKeyDown = (i, e) => {
+        if (e.key === "Backspace" && !digits[i] && i > 0) {
+          refs[i-1].current.focus();
+        }
+      };
+
+      return (
+        <div style={{
+          minHeight:"100vh", background:"#0d1117",
+          display:"flex", alignItems:"center", justifyContent:"center",
+          fontFamily:"'IBM Plex Mono','Fira Code',monospace",
+        }}>
+          <div style={{
+            background:"#161b22", border:"1px solid #30363d",
+            borderRadius:"16px", padding:"40px 48px", textAlign:"center",
+            width:"100%", maxWidth:"320px",
+          }}>
+            <div style={{fontSize:"32px", marginBottom:"12px"}}>🔒</div>
+            <div style={{fontSize:"18px", fontWeight:700, color:"#f0b429", marginBottom:"4px"}}>
+              Control de Precios
+            </div>
+            <div style={{fontSize:"12px", color:"#768390", marginBottom:"32px"}}>
+              Ingresá el código de 4 dígitos
+            </div>
+
+            <div style={{
+              display:"flex", gap:"12px", justifyContent:"center", marginBottom:"20px",
+              animation: shake ? "shake 0.4s ease" : "none",
+            }}>
+              {digits.map((d, i) => (
+                <input
+                  key={i}
+                  ref={refs[i]}
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={1}
+                  value={d}
+                  autoFocus={i === 0}
+                  onChange={e => handleKey(i, e.target.value)}
+                  onKeyDown={e => handleKeyDown(i, e)}
+                  style={{
+                    width:"52px", height:"60px", textAlign:"center",
+                    fontSize:"24px", fontWeight:700,
+                    background:"#1c2230",
+                    border:`2px solid ${error ? "#f85149" : d ? "#f0b429" : "#30363d"}`,
+                    borderRadius:"10px", color:"#e6edf3", outline:"none",
+                    fontFamily:"inherit", transition:"border-color .15s",
+                  }}
+                />
+              ))}
+            </div>
+
+            {error && (
+              <div style={{fontSize:"12px", color:"#f85149", marginTop:"4px"}}>
+                Código incorrecto
+              </div>
+            )}
+
+            <div style={{fontSize:"10px", color:"#3d444d", marginTop:"24px"}}>
+              Sesión de {SESSION_MINS} minutos
+            </div>
+          </div>
+
+          <style>{`
+            @keyframes shake {
+              0%,100% { transform: translateX(0); }
+              20%      { transform: translateX(-8px); }
+              40%      { transform: translateX(8px); }
+              60%      { transform: translateX(-6px); }
+              80%      { transform: translateX(6px); }
+            }
+          `}</style>
+        </div>
+      );
+    }
+
+    function Root() {
+      const [unlocked, setUnlocked] = useState(isSessionValid);
+      if (!unlocked) return <PinScreen onUnlock={() => setUnlocked(true)} />;
+      return <App />;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
   </script>
 </body>
 </html>
